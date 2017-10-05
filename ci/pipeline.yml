@@ -1,0 +1,348 @@
+---
+resource_types:
+- name: pivnet
+  type: docker-image
+  source:
+    repository: pivotalcf/pivnet-resource
+resources:
+- name: bbr
+  type: pivnet
+  source:
+    api_token: ((pivnet-api-token))
+    product_slug: p-bosh-backup-and-restore
+- name: concourse-backup
+  type: s3
+  source:
+    bucket: bosh-backup
+    regexp: concourse/concourse_(.*).tgz
+    access_key_id: ((s3-access-key-id))
+    secret_access_key: ((s3-secret-access-key))
+    region_name: ap-northeast-1
+- name: nexus-backup
+  type: s3
+  source:
+    bucket: bosh-backup
+    regexp: nexus/nexus(.*).tgz
+    access_key_id: ((s3-access-key-id))
+    secret_access_key: ((s3-secret-access-key))
+    region_name: ap-northeast-1
+- name: director-backup
+  type: s3
+  source:
+    bucket: bosh-backup
+    regexp: director/((bosh-environment))_(.*).tgz
+    access_key_id: ((s3-access-key-id))
+    secret_access_key: ((s3-secret-access-key))
+    region_name: ap-northeast-1
+- name: cf-backup
+  type: s3
+  source:
+    bucket: bosh-backup
+    regexp: cf/cf-d8c336d5971710b47bf2_(.*).tgz
+    access_key_id: ((s3-access-key-id))
+    secret_access_key: ((s3-secret-access-key))
+    region_name: ap-northeast-1
+
+params:
+  bosh: &BOSH
+    BOSH_CLIENT: ((bosh-client))
+    BOSH_ENVIRONMENT: ((bosh-environment))
+    BOSH_CLIENT_SECRET: ((bosh-client-secret))
+    BOSH_CA_CERT: ((bosh-ca-cert))
+    DIRECOTR_JUMPBOX_USERNAME: ((director-jumpbox-username))
+    DIRECOTR_JUMPBOX_PRIVATE_KEY: ((director-jumpbox-private-key))
+  opsmgr: &BASTION
+    BASTION_HOST: ((bastion-host))
+    BASTION_SSH_USER: ((bastion-ssh-user))
+    BASTION_SSH_KEY: ((bastion-ssh-key))    
+tasks:
+  bbr-pre-backup-check: &BBR_PRE_BACKUP_CHECK
+    platform: linux
+    image_resource:
+      type: docker-image
+      source:
+        repository: starkandwayne/concourse
+    inputs:
+    - name: bbr
+    outputs:
+    - name: backup
+    run:
+      path: bash
+      args: 
+      - -c
+      - |
+        set -e
+        
+        tar xf bbr/bbr-*.tar
+
+        cat <<EOF > ~/bastion_ssh
+        ${BASTION_SSH_KEY}
+        EOF
+        chmod 400 ~/bastion_ssh
+        SSH_OPTS="-oStrictHostKeyChecking=no -i ~/bastion_ssh"
+        SSH_TARGET=${BASTION_SSH_USER}@${BASTION_HOST}
+
+        scp ${SSH_OPTS} releases/bbr ${SSH_TARGET}:/tmp/
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+
+        export BOSH_CLIENT_SECRET=${BOSH_CLIENT_SECRET}
+        cat <<EOF > /tmp/bbr_ca_cert
+        ${BOSH_CA_CERT}
+        EOF
+
+        cd /tmp/
+        ./bbr version
+        ./bbr deployment -t ${BOSH_ENVIRONMENT} \
+                       -u ${BOSH_CLIENT} \
+                       -d ${DEPLOYMENT} \
+                       --ca-cert=/tmp/bbr_ca_cert \
+                       pre-backup-check
+        "
+  bbr-backup: &BBR_BACKUP
+    platform: linux
+    image_resource:
+      type: docker-image
+      source:
+        repository: starkandwayne/concourse
+    inputs:
+    - name: bbr
+    outputs:
+    - name: backup
+    run:
+      path: bash
+      args: 
+      - -c
+      - |
+        set -e
+        
+        tar xf bbr/bbr-*.tar
+
+        cat <<EOF > ~/bastion_ssh
+        ${BASTION_SSH_KEY}
+        EOF
+        chmod 400 ~/bastion_ssh
+        SSH_OPTS="-oStrictHostKeyChecking=no -i ~/bastion_ssh"
+        SSH_TARGET=${BASTION_SSH_USER}@${BASTION_HOST}
+
+        scp ${SSH_OPTS} releases/bbr ${SSH_TARGET}:/tmp/
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+
+        export BOSH_CLIENT_SECRET=${BOSH_CLIENT_SECRET}
+        cat <<EOF > /tmp/bbr_ca_cert
+        ${BOSH_CA_CERT}
+        EOF
+
+        cd /tmp/
+        ./bbr version
+        ./bbr deployment -t ${BOSH_ENVIRONMENT} \
+                       -u ${BOSH_CLIENT} \
+                       -d ${DEPLOYMENT} \
+                       --ca-cert=/tmp/bbr_ca_cert \
+                       backup
+        "
+
+        scp ${SSH_OPTS} -r ${SSH_TARGET}:/tmp/${DEPLOYMENT}_* ./backup/
+
+        cd backup
+        NAME=`ls | head -1`
+        tar czf ${NAME}.tgz ${NAME}
+
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+        rm -rf /tmp/${DEPLOYMENT}_* 
+        "
+  director-pre-backup-check: &DIRECTOR_PRE_BACKUP_CHECK
+    platform: linux
+    image_resource:
+      type: docker-image
+      source:
+        repository: starkandwayne/concourse
+    inputs:
+    - name: bbr
+    outputs:
+    - name: backup
+    run:
+      path: bash
+      args: 
+      - -c
+      - |
+        set -e
+        
+        tar xf bbr/bbr-*.tar
+
+        cat <<EOF > ~/bastion_ssh
+        ${BASTION_SSH_KEY}
+        EOF
+        chmod 400 ~/bastion_ssh
+        SSH_OPTS="-oStrictHostKeyChecking=no -i ~/bastion_ssh"
+        SSH_TARGET=${BASTION_SSH_USER}@${BASTION_HOST}
+
+        scp ${SSH_OPTS} releases/bbr ${SSH_TARGET}:/tmp/
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+
+        cat <<EOF > /tmp/private_key
+        ${DIRECOTR_JUMPBOX_PRIVATE_KEY}
+        EOF
+
+        cd /tmp/
+        ./bbr version
+        ./bbr director --host ${BOSH_ENVIRONMENT} \
+                       --username ${DIRECOTR_JUMPBOX_USERNAME} \
+                       --private-key-path=/tmp/private_key \
+                       pre-backup-check
+        "
+  director-backup: &DIRECTOR_BACKUP
+    platform: linux
+    image_resource:
+      type: docker-image
+      source:
+        repository: starkandwayne/concourse
+    inputs:
+    - name: bbr
+    outputs:
+    - name: backup
+    run:
+      path: bash
+      args: 
+      - -c
+      - |
+        set -e
+        
+        tar xf bbr/bbr-*.tar
+
+        cat <<EOF > ~/bastion_ssh
+        ${BASTION_SSH_KEY}
+        EOF
+        chmod 400 ~/bastion_ssh
+        SSH_OPTS="-oStrictHostKeyChecking=no -i ~/bastion_ssh"
+        SSH_TARGET=${BASTION_SSH_USER}@${BASTION_HOST}
+
+        scp ${SSH_OPTS} releases/bbr ${SSH_TARGET}:/tmp/
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+
+        cat <<EOF > /tmp/private_key
+        ${DIRECOTR_JUMPBOX_PRIVATE_KEY}
+        EOF
+
+        cd /tmp/
+        ./bbr version
+        ./bbr director --host ${BOSH_ENVIRONMENT} \
+                       --username ${DIRECOTR_JUMPBOX_USERNAME} \
+                       --private-key-path=/tmp/private_key \
+                       backup
+        "
+
+        scp ${SSH_OPTS} -r ${SSH_TARGET}:/tmp/${BOSH_ENVIRONMENT}_* ./backup/
+
+        cd backup
+        NAME=`ls | head -1`
+        tar czf ${NAME}.tgz ${NAME}
+        ls -lah
+
+        ssh ${SSH_OPTS} ${SSH_TARGET} "
+        set -e
+        rm -rf /tmp/${BOSH_ENVIRONMENT}_* 
+        "
+jobs:
+- name: pre-backup-check-cf
+  plan:
+  - get: bbr
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: cf-d8c336d5971710b47bf2
+    config:
+      <<: *BBR_PRE_BACKUP_CHECK
+- name: backup-cf
+  plan:
+  - get: bbr
+    passed:
+    - pre-backup-check-cf
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: cf-d8c336d5971710b47bf2
+    config:
+      <<: *BBR_BACKUP
+  - put: cf-backup
+    params:
+      file: backup/cf-d8c336d5971710b47bf2_*.tgz
+- name: pre-backup-check-concourse
+  plan:
+  - get: bbr
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: concourse
+    config:
+      <<: *BBR_PRE_BACKUP_CHECK
+- name: backup-concourse
+  plan:
+  - get: bbr
+    passed:
+    - pre-backup-check-concourse
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: concourse
+    config:
+      <<: *BBR_BACKUP
+  - put: concourse-backup
+    params:
+      file: backup/concourse_*.tgz
+- name: pre-backup-check-nexus
+  plan:
+  - get: bbr
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: nexus
+    config:
+      <<: *BBR_PRE_BACKUP_CHECK
+- name: backup-nexus
+  plan:
+  - get: bbr
+    passed:
+    - pre-backup-check-nexus
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+      DEPLOYMENT: nexus
+    config:
+      <<: *BBR_BACKUP
+  - put: nexus-backup
+    params:
+      file: backup/nexus_*.tgz
+- name: pre-backup-check-director
+  plan:
+  - get: bbr
+  - task: director
+    params:
+      <<: *BOSH
+      <<: *BASTION
+    config:
+      <<: *DIRECTOR_PRE_BACKUP_CHECK
+- name: backup-director
+  plan:
+  - get: bbr
+    passed:
+    - pre-backup-check-director
+  - task: bosh
+    params:
+      <<: *BOSH
+      <<: *BASTION
+    config:
+      <<: *DIRECTOR_BACKUP
+  - put: director-backup
+    params:
+      file: backup/((bosh-environment))_*.tgz
